@@ -6,7 +6,7 @@
  * Description        : IAP
  *******************************************************************************
  * Copyright (c) 2021 Nanjing Qinheng Microelectronics Co., Ltd.
- * Attention: This software (modified or not) and binary are used for 
+ * Attention: This software (modified or not) and binary are used for
  * microcontroller manufactured by Nanjing Qinheng Microelectronics.
  *******************************************************************************/
 #ifndef __IAP_H
@@ -31,33 +31,32 @@
 #define ERR_ERROR         0x01
 #define ERR_End           0x02
 
-#define CalAddr           (0x08004000-4)
+#define CalAddr           (0x08004000 - 4)
 #define CheckNum          (0x5aa55aa5)
 
-typedef union __attribute__ ((aligned(4)))_ISP_CMD {
+typedef union __attribute__((aligned(4))) _ISP_CMD
+{
+    struct
+    {
+        u8 Cmd;
+        u8 Len;
+        u8 data[64];
+    } UART;
 
-struct{
-
-    u8 Cmd;
-    u8 Len;
-    u8 data[64];
-}UART;
-
-struct{
-    u8 buf[64+2];
-}other;
-
+    struct
+    {
+        u8 buf[64 + 2];
+    } other;
 } isp_cmd;
 
 typedef void (*iapfun)(void);
 
-extern u8 EP2_Rx_Buffer[USBD_DATA_SIZE+4];
+extern u8 EP2_Rx_Buffer[USBD_DATA_SIZE + 4];
 
-u8 RecData_Deal(void);
+u8   RecData_Deal(void);
 void GPIO_Cfg_init(void);
-u8 PC3_Check(void);
+u8   PC3_Check(void);
 void USART1_CFG(void);
 void UART_Rx_Deal(void);
 
 #endif
-
