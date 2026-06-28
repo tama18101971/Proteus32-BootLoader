@@ -116,10 +116,10 @@ u8 RecData_Deal(void)
             Verify_addr       = FLASH_Base;
             s = ERR_End;
 
-            // Вычисляем адрес заранее (0x08003FFC & 0xFFFFFFC0 = 0x08003FC0)
-            FLASH_ErasePage_Fast(0x08003FC0); 
+            /* Erase last page (0x08003FFC & 0xFFFFFFC0 = 0x08003FC0) */
+            FLASH_ErasePage_Fast(0x08003FC0);
             FLASH_ProgramWord(CalAddr, CheckNum);
-            // Объединяем две тяжелые маски 0x8000 и 0x80 в одну операцию
+            /* Set bits 0x8000 and 0x80 in control register */
             FLASH->CTLR |= (uint32_t)0x00008080;
             break;
 
