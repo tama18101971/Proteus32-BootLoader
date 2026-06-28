@@ -77,21 +77,21 @@ int main(void)
     }
 #endif
 
-    GPIOC->CFGLR = (GPIOC->CFGLR & ~(0xF << 28)) | (0x3 << 28);
-    GPIOC->BSHR = (1 << 7);
+    GPIOC->CFGLR = (GPIOC->CFGLR & ~((0xF << 16) | (0xF << 28)))
+             | ((0x3 << 16) | (0x3 << 28));
+    GPIOC->BSHR = (1 << 4) | (1 << 7);
 
-    while(1)
+while(1)
+{
+    // Вызывать обработчик, только когда данные РЕАЛЬНО пришли (RXNE != 0)
+    if((USART1->STATR & USART_FLAG_RXNE) != (uint16_t)RESET)
     {
-        if((USART1->STATR & USART_FLAG_RXNE) == (uint16_t)RESET)
-        {
-            UART_Rx_Deal();
-        }
-
-        if (End_Flag)
-        {
-            IAP_2_APP();
-            while(1);
-        }
-
+        UART_Rx_Deal();
     }
-}
+
+    if (End_Flag)
+    {
+        IAP_2_APP();
+        while(1);
+    }
+}}

@@ -148,21 +148,14 @@ u8 RecData_Deal(void)
  */
 u8 PC3_Check(void)
 {
-    u8 i,cnt=0;
+    GPIOC->CFGLR = (GPIOC->CFGLR & 0xFFFF0FFF) | 0x00008000;
+    GPIOC->BSHR = 0x00000008;
 
-    GPIOC->CFGLR &= (uint32_t)(~0xF000);
-    GPIOC->CFGLR |= (uint32_t)(0x8000);
-    GPIOC->BSHR = ((uint32_t)0x08);
-
-    for(i = 0;i<10;i++)
-    {
-        if((GPIOC->INDR & GPIO_Pin_3)==0)
-        {
-            cnt++;
-        }
-    }
-    if(cnt > 6) return 0;
-    else return 1;
+    // Вместо цикла на 10 итераций с ветвлениями — просто жесткая задержка на чтение
+    if (GPIOC->INDR & GPIO_Pin_3) return 1;
+    // Маленькая холостая пауза в несколько тактов процессора
+    __asm__ volatile("nop; nop; nop; nop;"); 
+    return (GPIOC->INDR & GPIO_Pin_3) ? 1 : 0;
 }
 
 /*********************************************************************
