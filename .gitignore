@@ -1,0 +1,17 @@
+obj/
+*.o
+*.d
+*.map
+*.elf
+*.bin
+*.hex
+*.lst
+*.siz
+*.mk
+makefile
+.mrs/
+*.wvproj
+*.cproject
+*.project
+*.template
+*.mrs-workspace
