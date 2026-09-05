@@ -15,3 +15,5 @@ makefile
 *.project
 *.template
 *.mrs-workspace
+build/
+__pycache__/

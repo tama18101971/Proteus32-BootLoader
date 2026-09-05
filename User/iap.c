@@ -1,9 +1,18 @@
 /********************************** (C) COPYRIGHT  *******************************
  * File Name          : iap.c
- * Author             : WCH
- * Version            : V1.0.1
- * Date               : 2025/01/09
- * Description        : IAP
+ * Author             : WCH / Proteus32
+ * Version            : V2.0.0
+ * Date               : 2026/09/05
+ * Description        : IAP — UART protocol v2, WL_FLASH-safe.
+ *
+ * Protocol v2 (TZ BOOTLOADER_TZ.md v1.0):
+ *   - no FLASH_EraseAllPages() (MER) anywhere; ERASE = 252 x 64-B page erase
+ *     strictly inside [0x08000000, 0x08003F00);
+ *   - END performs no flash operations at all and replies ACK before reset;
+ *   - PROM/VERIFY guarded: any attempt outside the app area -> ERR_RANGE
+ *     before a single byte is written;
+ *   - READ (0x84, addr, u32 LE) dumps 64 B of the whole user flash (read-only);
+ *   - status codes: 0x00 OK, 0x01 ERR, 0x02 ERR_RANGE, 0x03 ERR_VERIFY.
  *******************************************************************************
  * Copyright (c) 2021 Nanjing Qinheng Microelectronics Co., Ltd.
  * Attention: This software (modified or not) and binary are used for
@@ -18,12 +27,26 @@
 
 u32 Program_addr     = FLASH_Base;
 u32 Verify_addr      = FLASH_Base;
-u8  Verify_Star_flag = 0;
 u8  Fast_Program_Buf[128];
 u16 CodeLen          = 0;
 u8  End_Flag         = 0;
 u8  EP2_Rx_Buffer[USBD_DATA_SIZE + 4];
 #define isp_cmd_t ((isp_cmd *)EP2_Rx_Buffer)
+
+/*********************************************************************
+ * @fn      Session_Reset
+ *
+ * @brief   Reset the UART session state (P5 of the TZ): aborted
+ *          sessions must not leak into the next one.
+ *
+ * @return  none
+ */
+static void Session_Reset(void)
+{
+    Program_addr     = FLASH_Base;
+    Verify_addr      = FLASH_Base;
+    CodeLen          = 0;
+}
 
 /*********************************************************************
  * @fn      USART1_CFG
@@ -49,25 +72,44 @@ void USART1_CFG(void)
  *
  * @brief   UART deal data
  *
- * @return  ERR_ERROR - ERROR
- *          ERR_SUCCESS - SUCCESS
- *          ERR_End - End
+ * @return  ERR_SUCCESS - SUCCESS
+ *          ERR_ERROR - ERROR
+ *          ERR_RANGE - out of app-area bounds
+ *          ERR_VERIFY - verify mismatch
+ *          ERR_Read_Ok - READ completed (data in isp_cmd_t->UART.data)
  */
 u8 RecData_Deal(void)
 {
-    u8  i, s, Lenth;
+    u8  i, s;
+    u8  Lenth;
+    u32 a;
 
     Lenth = isp_cmd_t->UART.Len;
+    s     = ERR_SUCCESS;
 
     switch (isp_cmd_t->UART.Cmd)
     {
         case CMD_IAP_ERASE:
+            /* Page erase the app area [FLASH_Base, FLASH_APP_END) only.
+             * 252 x 64 B; WL_FLASH (0x08003F00..0x08003FFF) is never touched. */
             FLASH_Unlock_Fast();
-            FLASH_EraseAllPages();
-            s = ERR_SUCCESS;
+            for (a = FLASH_Base; a < FLASH_APP_END; a += FLASH_PAGE_SIZE)
+            {
+                FLASH_ErasePage_Fast(a);
+            }
+            FLASH_Lock_Fast();
+            /* Reset session state (P5 of the TZ) */
+            Session_Reset();
             break;
 
         case CMD_IAP_PROM:
+            /* Guard: refuse the whole block BEFORE any write. The 252nd page
+             * ends exactly at FLASH_APP_END; nothing beyond may be touched. */
+            if (Program_addr + FLASH_PAGE_SIZE > FLASH_APP_END)
+            {
+                s = ERR_RANGE;
+                break;
+            }
             for (i = 0; i < Lenth; i++)
             {
                 Fast_Program_Buf[CodeLen + i] = isp_cmd_t->UART.data[i];
@@ -83,48 +125,57 @@ u8 RecData_Deal(void)
                 }
                 Program_addr += 0x40;
             }
-            s = ERR_SUCCESS;
             break;
 
         case CMD_IAP_VERIFY:
-            if (Verify_Star_flag == 0)
+            /* Guard: never verify outside the app area. */
+            if (Verify_addr + FLASH_PAGE_SIZE > FLASH_APP_END)
             {
-                Verify_Star_flag = 1;
-                for (i = 0; i < (64 - CodeLen); i++)
-                {
-                    Fast_Program_Buf[CodeLen + i] = 0xFF;
-                }
-                CH32_IAP_Program(Program_addr, (u32 *)Fast_Program_Buf);
-                CodeLen = 0;
+                s = ERR_RANGE;
+                break;
             }
-            s = ERR_SUCCESS;
             for (i = 0; i < Lenth; i++)
             {
                 if (isp_cmd_t->UART.data[i] != *(u8 *)(Verify_addr + i))
                 {
-                    s = ERR_ERROR;
+                    s = ERR_VERIFY;
                     break;
                 }
             }
-            Verify_addr += Lenth;
+            /* On mismatch the address is NOT advanced: a resend retries
+             * the same block. */
+            if (s == ERR_SUCCESS)
+            {
+                Verify_addr += Lenth;
+            }
             break;
 
         case CMD_IAP_END:
-            Verify_Star_flag = 0;
-            End_Flag          = 1;
-            Program_addr      = FLASH_Base;
-            Verify_addr       = FLASH_Base;
-            s = ERR_End;
-
-            /* Erase last page (0x08003FFC & 0xFFFFFFC0 = 0x08003FC0) */
-            FLASH_ErasePage_Fast(0x08003FC0);
-            FLASH_ProgramWord(CalAddr, CheckNum);
-            /* Set bits 0x8000 and 0x80 in control register */
-            FLASH->CTLR |= (uint32_t)0x00008080;
+            /* No flash operations at all: no magic word, no page erase.
+             * Reply ACK (status = ERR_SUCCESS), then main() waits >=100 ms
+             * and resets into the application. */
+            Session_Reset();
+            End_Flag = 1;
             break;
 
-        case CMD_JUMP_IAP:
-            s = ERR_SUCCESS;
+        case CMD_IAP_READ:
+            /* Payload = target address, u32 little-endian. */
+            a = (u32)isp_cmd_t->UART.data[0]
+              | ((u32)isp_cmd_t->UART.data[1] << 8)
+              | ((u32)isp_cmd_t->UART.data[2] << 16)
+              | ((u32)isp_cmd_t->UART.data[3] << 24);
+            /* Read-only window: the whole user flash (incl. WL_FLASH),
+             * 64-B aligned window — data replaces the request payload. */
+            if ((a < FLASH_Base) || (a + FLASH_PAGE_SIZE > FLASH_USER_END))
+            {
+                s = ERR_RANGE;
+                break;
+            }
+            for (i = 0; i < FLASH_PAGE_SIZE; i++)
+            {
+                isp_cmd_t->UART.data[i] = *(u8 *)(a + i);
+            }
+            s = ERR_Read_Ok;
             break;
 
         default:
@@ -227,6 +278,7 @@ void UART_Rx_Deal(void)
     isp_cmd_t->UART.Len = Uart1_Rx();
     Data_add += isp_cmd_t->UART.Len;
 
+    /* ERASE and VERIFY carry a 4-byte address placeholder after Len. */
     if (isp_cmd_t->UART.Cmd == CMD_IAP_ERASE ||
         isp_cmd_t->UART.Cmd == CMD_IAP_VERIFY)
     {
@@ -240,8 +292,8 @@ void UART_Rx_Deal(void)
         Data_add += isp_cmd_t->other.buf[5];
     }
 
-    if ((isp_cmd_t->other.buf[0] == CMD_IAP_PROM) ||
-        (isp_cmd_t->other.buf[0] == CMD_IAP_VERIFY))
+    /* Payload: PROM/VERIFY = 64 B, READ = 4 B (addr, u32 LE). */
+    if (isp_cmd_t->UART.Len > 0)
     {
         for (i = 0; i < isp_cmd_t->UART.Len; i++)
         {
@@ -257,13 +309,33 @@ void UART_Rx_Deal(void)
 
     s = RecData_Deal();
 
-    if (s != ERR_End)
+    if (s == ERR_Read_Ok)
     {
+        /* READ response: AA 55 84 00 <Data[64]> CKL CKH 55 AA
+         * CK = (0x84 + 0x00 + sum(Data)) mod 0x10000, little-endian. */
+        u16 ck = CMD_IAP_READ;
+        for (i = 0; i < FLASH_PAGE_SIZE; i++)
+        {
+            ck += isp_cmd_t->UART.data[i];
+        }
         UART1_SendData(Uart_Sync_Head1);
         UART1_SendData(Uart_Sync_Head2);
+        UART1_SendData(CMD_IAP_READ);
         UART1_SendData(0x00);
-        UART1_SendData(s == ERR_ERROR ? 0x01 : 0x00);
+        UART1_SendMultiyData((u8 *)&isp_cmd_t->UART.data[0], FLASH_PAGE_SIZE);
+        UART1_SendData((u8)(ck & 0xFF));
+        UART1_SendData((u8)(ck >> 8));
         UART1_SendData(Uart_Sync_Head2);
         UART1_SendData(Uart_Sync_Head1);
+        return;
     }
+
+    /* Base response: AA 55 00 ST 55 AA (byte[2] is a constant 0x00, ST is
+     * the status code 0x00..0x03). END replies ACK too, then resets. */
+    UART1_SendData(Uart_Sync_Head1);
+    UART1_SendData(Uart_Sync_Head2);
+    UART1_SendData(0x00);
+    UART1_SendData(s);
+    UART1_SendData(Uart_Sync_Head2);
+    UART1_SendData(Uart_Sync_Head1);
 }
