@@ -81,7 +81,6 @@ int main(void)
 {
     u32 i;
     u32 led_tick = 0;
-    u8  led4_on  = 0;
     u8  led7_on  = 0;
 
     /* Enable peripheral clocks: GPIOD (USART1 pins), USART1, GPIOC (status LEDs) */
@@ -103,58 +102,50 @@ int main(void)
     /*
      * Status LEDs: PC4 (green) and PC7 (red) both lit (active-high, "1" =
      * LED on) as the "bootloader entered" indicator. Push-pull outputs.
-     * During the IAP wait PC7 blinks at ~4 Hz, PC4 stays on; on active
-     * UART exchange PC4 blinks at ~4 Hz as well. Both LEDs are off when
-     * the transfer completes (before the reset into the app).
+     * PC7 (red) blinks at ~4 Hz in the IAP wait (and during the exchange);
+     * PC4 (green) stays on. Both LEDs are off when the transfer completes
+     * (before the reset into the app).
      */
     GPIOC->CFGLR = (GPIOC->CFGLR & ~((0xF << 16) | (0xF << 28)))
                   | ((0x3 << 16) | (0x3 << 28));
     GPIOC->BSHR  = (1 << 4) | (1 << 7);
     GPIOC->BCR   = 0;
-    led_tick     = 0;
 
     /*
      * Main IAP loop: continuously poll USART1 for incoming data.
      * When End_Flag is set the transfer is complete: drain the UART
      * (>=100 ms) so the host receives the END ACK, then jump to APP.
+     *
+     * IMPORTANT: RXNE must be serviced on EVERY loop iteration, fully
+     * independent of the LED logic. Previously it was gated behind
+     * led4_on, which locked out UART_Rx_Deal() for ~1 s per frame:
+     * the host resends, the frame overruns, no ACK -> ~4 s per 64-B
+     * block ("1% per 10 s"). The LED side effects are cosmetic only.
      */
     while (1)
     {
-        /* Blink source: loop iteration count. ~6.0e6 iterations = 1 s at
-         * 24 MHz (measured via the END drain), so 1.5e6 = 250 ms = 4 Hz. */
-        led_tick++;
-
-        /* Active UART exchange: blink PC4 (green) at ~4 Hz; PC7 off. */
-        if (led4_on)
+        /* Always service incoming bytes first — never gate RXNE behind
+         * any LED/state logic (stop-and-wait protocol, see above). */
+        if ((USART1->STATR & USART_FLAG_RXNE) != (uint16_t)RESET)
         {
-            if ((led_tick & 0x7FFFF) == 0)
-            {
-                GPIOC->BSHR = (uint32_t)0x0010;  /* PC4 off */
-                led4_on     = 0;
-            }
-        }
-        else if ((USART1->STATR & USART_FLAG_RXNE) != (uint16_t)RESET)
-        {
-            GPIOC->BCR = (uint32_t)0x0010;       /* PC4 on */
-            led4_on    = 1;
             UART_Rx_Deal();
         }
 
-        /* Idle wait: blink PC7 (red) at ~4 Hz. */
-        if (led4_on == 0)
+        /* Blink source: loop iteration count. Measured on hardware:
+         * 0x7FFFF (~524288) iterations = ~1 s, so 0x1FFFF (~131072)
+         * gives ~250 ms half-period = ~4 Hz blink of PC7 (red). */
+        led_tick = (led_tick + 1) & 0x1FFFFF;
+        if ((led_tick & 0x1FFFF) == 0)
         {
-            if ((led_tick & 0x7FFFF) == 0)
+            if (led7_on)
             {
-                if (led7_on)
-                {
-                    GPIOC->BSHR = (uint32_t)0x0080;  /* PC7 off */
-                    led7_on     = 0;
-                }
-                else
-                {
-                    GPIOC->BCR  = (uint32_t)0x0080;  /* PC7 on */
-                    led7_on     = 1;
-                }
+                GPIOC->BSHR = (uint32_t)0x0080;  /* PC7 off */
+                led7_on     = 0;
+            }
+            else
+            {
+                GPIOC->BCR  = (uint32_t)0x0080;  /* PC7 on */
+                led7_on     = 1;
             }
         }
 
