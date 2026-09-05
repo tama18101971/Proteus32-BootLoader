@@ -81,6 +81,7 @@ int main(void)
 {
     u32 i;
     u32 led_tick = 0;
+    u8  led4_on  = 0;
     u8  led7_on  = 0;
 
     /* Enable peripheral clocks: GPIOD (USART1 pins), USART1, GPIOC (status LEDs) */
@@ -108,8 +109,8 @@ int main(void)
      */
     GPIOC->CFGLR = (GPIOC->CFGLR & ~((0xF << 16) | (0xF << 28)))
                   | ((0x3 << 16) | (0x3 << 28));
-    GPIOC->BSHR  = (1 << 4) | (1 << 7);
-    GPIOC->BCR   = 0;
+    GPIOC->BSHR  = (1 << 7);   /* red on: bootloader-entered heartbeat */
+    GPIOC->BCR   = (1 << 4);   /* green off until the first data arrives */
 
     /*
      * Main IAP loop: continuously poll USART1 for incoming data.
@@ -128,12 +129,20 @@ int main(void)
          * any LED/state logic (stop-and-wait protocol, see above). */
         if ((USART1->STATR & USART_FLAG_RXNE) != (uint16_t)RESET)
         {
+            /* Green latches on with the very first byte of the exchange
+             * (the ERASE frame) and stays on until END. */
+            if (led4_on == 0)
+            {
+                GPIOC->BSHR = (uint32_t)0x0010;  /* green on */
+                led4_on     = 1;
+            }
             UART_Rx_Deal();
         }
 
         /* Blink source: loop iteration count. Measured on hardware:
          * 0x7FFFF (~524288) iterations = ~1 s, so 0x1FFFF (~131072)
-         * gives ~250 ms half-period = ~4 Hz blink of PC7 (red). */
+         * gives ~250 ms half-period = ~4 Hz blink of PC7 (red).
+         * Active-high: BSHR = on, BCR = off. */
         led_tick = (led_tick + 1) & 0x1FFFFF;
         if ((led_tick & 0x1FFFF) == 0)
         {
@@ -152,7 +161,7 @@ int main(void)
         /* Firmware update complete — jump to the application */
         if (End_Flag)
         {
-            GPIOC->BSHR = (uint32_t)0x0090;  /* both LEDs off */
+            GPIOC->BCR = (uint32_t)0x0090;  /* both LEDs off */
             for (i = 0; i < END_DRAIN_DELAY; i++)
             {
                 __asm__ volatile("nop");
