@@ -117,6 +117,11 @@ u8 RecData_Deal(void)
             CodeLen += Lenth;
             if (CodeLen >= 64)
             {
+                /* Re-enter fast program mode for this block: ERASE locks it
+                 * afterwards (TZ 3.5.2), and a locked flash silently skips
+                 * programming (VERIFY then fails at block 0). Unlock is
+                 * idempotent, so this is safe across the whole session. */
+                FLASH_Unlock_Fast();
                 CH32_IAP_Program(Program_addr, (u32 *)Fast_Program_Buf);
                 CodeLen -= 64;
                 for (i = 0; i < CodeLen; i++)
