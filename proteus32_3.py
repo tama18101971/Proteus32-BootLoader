@@ -119,22 +119,22 @@ def make_packet(cmd, addr=FLASH_BASE, data=None):
     ])
 
 
-def parse_base_response(raw, timeout=None):
-    """Parse a 6-byte base response. Returns (ok, status, raw).
+def parse_base_response(raw):
+    """Parse a 6-byte base response. Returns (ok, status).
 
     ok = True only for AA 55 00 00 55 AA (ST_OK). For other statuses ok=False,
     status carries the code so the caller can spell out the error.
     """
     if raw is None:
-        return False, None, b""
+        return False, None
     if len(raw) < 6:
-        return False, None, raw
+        return False, None
     if raw[0] != SYNC_HEAD1 or raw[1] != SYNC_HEAD2 or raw[2] != 0x00:
-        return False, None, raw
+        return False, None
     status = raw[3]
     if raw[4] != SYNC_HEAD2 or raw[5] != SYNC_HEAD1:
-        return False, None, raw
-    return status == ST_OK, status, raw
+        return False, None
+    return status == ST_OK, status
 
 
 def wait_response(ser, timeout=TIMEOUT_CMD):
@@ -151,33 +151,67 @@ def wait_response(ser, timeout=TIMEOUT_CMD):
 
 
 def wait_read_response(ser, timeout=TIMEOUT_CMD):
-    """Read a READ frame: AA 55 84 00 <64B> CKL CKH 55 AA (76 bytes).
+    """Read a READ frame: AA 55 84 00 <64B> CKL CKH 55 AA (72 bytes).
 
-    Validates the frame and the checksum. Returns (data, None) on success,
+    Tolerates the variant with a 4-byte address echo before the data
+    (76 bytes total, as flashed on some benches): the layout is detected
+    by checksum validation. Returns (data, None) on success,
     (None, error_message) otherwise.
     """
-    expected_len = 6 + BLOCK_SIZE + 4
+    min_len = 4 + BLOCK_SIZE + 4       # header + data + CK + tail = 72
+    max_len = min_len + 4              # room for an eventual addr echo
+    tail = bytes([SYNC_HEAD2, SYNC_HEAD1])
     buf = bytearray()
     deadline = time.time() + timeout
     while time.time() < deadline:
         if ser.in_waiting:
-            buf += ser.read(min(ser.in_waiting, expected_len - len(buf)))
-            if len(buf) >= expected_len:
+            buf += ser.read(min(ser.in_waiting, max_len - len(buf)))
+            if len(buf) >= max_len:
+                break
+            # Stop only on a complete frame candidate: breaking at min_len
+            # could truncate the 76-byte echo variant on a split USB-serial
+            # read, burning all retries on a mis-timed split.
+            if len(buf) >= min_len and buf[-2:] == tail:
                 break
         time.sleep(0.001)
-    if len(buf) < expected_len:
-        return None, "неполный кадр READ (получено %d из %d байт)" % (len(buf), expected_len)
-    if buf[0] != SYNC_HEAD1 or buf[1] != SYNC_HEAD2 or buf[2] != CMD_IAP_READ or buf[3] != 0x00:
-        return None, "неверный заголовок кадра READ"
-    ck = (CMD_IAP_READ + 0x00 + sum(buf[4:4 + BLOCK_SIZE])) & 0xFFFF
-    if buf[70] != (ck & 0xFF) or buf[71] != ((ck >> 8) & 0xFF):
-        return None, "контрольная сумма READ не совпадает"
-    if buf[72] != SYNC_HEAD2 or buf[73] != SYNC_HEAD1:
-        return None, "неверный хвост кадра READ"
-    return bytes(buf[4:4 + BLOCK_SIZE]), None
+    if len(buf) < min_len:
+        return None, "неполный кадр READ (получено %d байт)" % len(buf)
+
+    for skip in (0, 4):                # 0 = no echo, 4 = addr echo before data
+        if len(buf) < 4 + skip + BLOCK_SIZE + 4:
+            continue
+        data = buf[4 + skip:4 + skip + BLOCK_SIZE]
+        ck = (CMD_IAP_READ + 0x00 + sum(data)) & 0xFFFF
+        ck_off = 4 + skip + BLOCK_SIZE
+        tail = buf[ck_off + 2:ck_off + 4]
+        if (buf[ck_off] == (ck & 0xFF) and buf[ck_off + 1] == ((ck >> 8) & 0xFF)
+                and tail == bytes([SYNC_HEAD2, SYNC_HEAD1])):
+            return bytes(data), None
+        if buf[0] != SYNC_HEAD1 or buf[1] != SYNC_HEAD2 or buf[2] != CMD_IAP_READ or buf[3] != 0x00:
+            return None, "неверный заголовок кадра READ"
+    return None, "контрольная сумма READ не совпадает"
 
 
-def send_packet(ser, packet, timeout=TIMEOUT_CMD, expect_response=True):
+def send_read_packet(ser, packet, timeout=TIMEOUT_CMD):
+    """Send a READ request with retries and collect the data frame answer.
+
+    Same transport policy as send_packet (MAX_RETRIES attempts,
+    reset_input_buffer between attempts), but the expected answer is the
+    72/76-byte READ data frame, not the 6-byte base response. Returns
+    (data, None) on success, (None, error_message) otherwise.
+    """
+    err = None
+    for _ in range(MAX_RETRIES):
+        ser.reset_input_buffer()
+        ser.write(packet)
+        ser.flush()
+        block, err = wait_read_response(ser, timeout=timeout)
+        if block is not None:
+            return block, None
+    return None, err
+
+
+def send_packet(ser, packet, timeout=TIMEOUT_CMD):
     """Send a packet with retries (3x, reset_input_buffer between attempts).
 
     Returns (ok, status_or_error):
@@ -189,11 +223,7 @@ def send_packet(ser, packet, timeout=TIMEOUT_CMD, expect_response=True):
         ser.write(packet)
         ser.flush()
 
-        if not expect_response:
-            return True, ST_OK
-
-        raw = wait_response(ser, timeout)
-        ok, status, raw = parse_base_response(raw)
+        ok, status = parse_base_response(wait_response(ser, timeout))
         if ok:
             return True, status
         if status is not None:
@@ -202,6 +232,47 @@ def send_packet(ser, packet, timeout=TIMEOUT_CMD, expect_response=True):
             return False, status
 
     return False, None
+
+
+def send_end_best_effort(ser, timeout=TIMEOUT_CMD):
+    """Send END once (no retries) and wait for its ACK best-effort.
+
+    The bootloader jumps into the application right after END, so the ACK
+    can be lost on the wire; per TZ 4.3 p.5 a missing ACK is not an error.
+    Returns (ok, status): ok=True only on a confirmed ST_OK ACK.
+    """
+    ser.reset_input_buffer()
+    ser.write(make_packet(CMD_IAP_END))
+    ser.flush()
+    ok, status = parse_base_response(wait_response(ser, timeout=timeout))
+    return ok, status
+
+
+def probe_protocol_v2(ser, timeout=TIMEOUT_CMD):
+    """Confirm the device runs bootloader rev 2 before any destructive command.
+
+    READ (0x84) exists only in rev 2: a rev-2 device answers with a 72-byte
+    data frame, rev 1 answers with an error frame or stays silent — and on
+    rev 1 the identical ERASE/END frames damage WL_FLASH settings. Returns
+    (data, None) on success, (None, error_message) otherwise.
+    """
+    ser.reset_input_buffer()
+    ser.write(make_packet(CMD_IAP_READ, addr=FLASH_BASE))
+    ser.flush()
+    return wait_read_response(ser, timeout=timeout)
+
+
+def fail_no_v2(err):
+    print("FAILED")
+    print(
+        "Загрузчик не подтвердил протокол rev 2 (READ 0x84): %s\n"
+        "Проверьте: устройство в IAP-режиме (питание при зажатой кнопке),\n"
+        "проводку PD5/PD6 и скорость 460800.\n"
+        "Если на плате загрузчик rev 1 — обновите его через WCH-Link:\n"
+        "ERASE/END этого скрипта на rev 1 повреждают настройки WL_FLASH."
+        % (err or "нет ответа")
+    )
+    return 1
 
 
 def check_size(size):
@@ -245,6 +316,10 @@ def cmd_write(port, filepath, baudrate, do_verify):
     with open(filepath, "rb") as f:
         data = f.read()
 
+    if not data:
+        print("ERROR: Firmware file is empty; nothing to flash.")
+        return 1
+
     if not check_size(len(data)):
         return 1
 
@@ -268,6 +343,13 @@ def cmd_write(port, filepath, baudrate, do_verify):
     try:
         ser.reset_input_buffer()
         ser.reset_output_buffer()
+
+        # ---- 0. Protocol probe (READ exists only in rev 2) ----
+        print("▶ Checking bootloader revision...".ljust(40), end="", flush=True)
+        probe_data, probe_err = probe_protocol_v2(ser)
+        if probe_data is None:
+            return fail_no_v2(probe_err)
+        print("OK (rev 2)")
 
         # ---- 1. ERASE (timeout 10 s, ~1 s of real erase) ----
         stage_start = time.time()
@@ -337,9 +419,9 @@ def cmd_write(port, filepath, baudrate, do_verify):
             print("▶ Verify".ljust(40), end="", flush=True)
             print("SKIPPED (--no-verify)")
 
-        # ---- 4. END (ACK may be lost in the reset; not an error) ----
+        # ---- 4. END (best-effort ACK: the device may already run the app) ----
         print("▶ Starting application...".ljust(40), end="", flush=True)
-        send_packet(ser, make_packet(CMD_IAP_END), expect_response=False)
+        send_end_best_effort(ser)
         time.sleep(0.5)
         print("OK")
         print()
@@ -369,12 +451,17 @@ def cmd_erase_only(port, baudrate):
     try:
         ser.reset_input_buffer()
         ser.reset_output_buffer()
+        print("▶ Checking bootloader revision...".ljust(40), end="", flush=True)
+        probe_data, probe_err = probe_protocol_v2(ser)
+        if probe_data is None:
+            return fail_no_v2(probe_err)
+        print("OK (rev 2)")
         print("▶ Erasing app area (WL_FLASH untouched)...".ljust(40), end="", flush=True)
         ok, status = send_packet(ser, make_packet(CMD_IAP_ERASE), timeout=TIMEOUT_ERASE)
         if not ok:
             return fail_with_hint(status)
         print("OK")
-        send_packet(ser, make_packet(CMD_IAP_END), expect_response=False)
+        send_end_best_effort(ser)
         time.sleep(0.3)
         return 0
     finally:
@@ -382,6 +469,9 @@ def cmd_erase_only(port, baudrate):
 
 
 def cmd_dump(port, baudrate, filepath, addr, length):
+    if length <= 0:
+        print("ERROR: --len must be a positive byte count.")
+        return 1
     if addr % BLOCK_SIZE:
         print("ERROR: --addr must be 64-byte aligned (page granularity).")
         return 1
@@ -406,16 +496,8 @@ def cmd_dump(port, baudrate, filepath, addr, length):
         out = bytearray()
         for a in range(addr, addr + length, BLOCK_SIZE):
             packet = make_packet(CMD_IAP_READ, addr=a)
-            ok = False
-            for _ in range(MAX_RETRIES):
-                ser.reset_input_buffer()
-                ser.write(packet)
-                ser.flush()
-                block, err = wait_read_response(ser)
-                if block is not None:
-                    ok = True
-                    break
-            if not ok:
+            block, err = send_read_packet(ser, packet)
+            if block is None:
                 print("✗ READ failed at 0x%08X: %s" % (a, err or "нет ответа"))
                 return 1
             out += block
@@ -436,9 +518,16 @@ def cmd_go(port, baudrate):
     try:
         ser.reset_input_buffer()
         ser.reset_output_buffer()
-        send_packet(ser, make_packet(CMD_IAP_END), expect_response=False)
-        time.sleep(0.5)
-        print("✓ END sent, device reset into the application")
+        print("▶ Checking bootloader revision...".ljust(40), end="", flush=True)
+        probe_data, probe_err = probe_protocol_v2(ser)
+        if probe_data is None:
+            return fail_no_v2(probe_err)
+        print("OK (rev 2)")
+        ok, _status = send_end_best_effort(ser)
+        if ok:
+            print("✓ END acknowledged, device reset into the application")
+        else:
+            print("✓ END sent (no ACK - device already runs the application)")
         return 0
     finally:
         ser.close()
@@ -504,31 +593,30 @@ def main():
         if not args.port:
             print("ERROR: --dump requires <port>")
             return 1
-        return cmd_dump(args.port, args.baudrate, args.dump, args.addr, args.len)
-
-    if args.erase_only:
+        run = lambda: cmd_dump(args.port, args.baudrate, args.dump, args.addr, args.len)
+    elif args.erase_only:
         if not args.port:
             print("ERROR: --erase-only requires <port>")
             return 1
-        return cmd_erase_only(args.port, args.baudrate)
-
-    if args.go:
+        run = lambda: cmd_erase_only(args.port, args.baudrate)
+    elif args.go:
         if not args.port:
             print("ERROR: --go requires <port>")
             return 1
-        return cmd_go(args.port, args.baudrate)
+        run = lambda: cmd_go(args.port, args.baudrate)
+    else:
+        # Default: full write cycle
+        if not args.port or not args.firmware:
+            parser.print_help()
+            return 1
 
-    # Default: full write cycle
-    if not args.port or not args.firmware:
-        parser.print_help()
-        return 1
-
-    if not os.path.isfile(args.firmware):
-        print("ERROR: File not found: %s" % args.firmware)
-        return 1
+        if not os.path.isfile(args.firmware):
+            print("ERROR: File not found: %s" % args.firmware)
+            return 1
+        run = lambda: cmd_write(args.port, args.firmware, args.baudrate, not args.no_verify)
 
     try:
-        return cmd_write(args.port, args.firmware, args.baudrate, not args.no_verify)
+        return run()
     except serial.SerialException as e:
         print(
             "\n✗ Serial error: %s\n"
