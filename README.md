@@ -1,5 +1,7 @@
 # CH32V003 UART IAP Bootloader — Proteus32, Revision 2 (WL_FLASH-safe)
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 UART-загрузчик для WCH CH32V003F4U6 (Proteus32). Принимает прошивку по USART1
 на 460800 8N1 и записывает её в пользовательский flash с 0x08000000, **не
 затрагивая область настроек WL_FLASH** (0x08003F00–0x08003FFF).
