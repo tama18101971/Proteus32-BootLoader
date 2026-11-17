@@ -67,6 +67,7 @@ typedef union __attribute__((aligned(4))) _ISP_CMD
 typedef void (*iapfun)(void);
 
 extern u8 EP2_Rx_Buffer[USBD_DATA_SIZE + 4];
+extern u8 Sync_Head1_Received;
 
 u8   RecData_Deal(void);
 u8   PC3_Check(void);

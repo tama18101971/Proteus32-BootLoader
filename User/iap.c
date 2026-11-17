@@ -30,6 +30,7 @@ u32 Verify_addr      = FLASH_Base;
 u8  Fast_Program_Buf[128];
 u16 CodeLen          = 0;
 u8  End_Flag         = 0;
+u8  Sync_Head1_Received = 0;
 u8  EP2_Rx_Buffer[USBD_DATA_SIZE + 4];
 #define isp_cmd_t ((isp_cmd *)EP2_Rx_Buffer)
 
@@ -275,7 +276,14 @@ void UART_Rx_Deal(void)
     u8  i, s;
     u16 Data_add = 0;
 
-    if (Uart1_Rx() != Uart_Sync_Head1) return;
+    if (Sync_Head1_Received)
+    {
+        Sync_Head1_Received = 0;
+    }
+    else if (Uart1_Rx() != Uart_Sync_Head1)
+    {
+        return;
+    }
     if (Uart1_Rx() != Uart_Sync_Head2) return;
 
     isp_cmd_t->UART.Cmd = Uart1_Rx();
