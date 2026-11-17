@@ -32,17 +32,19 @@ REM -------------------------- toolchain discovery ----------------------------
 set "TCBIN="
 for %%D in (
     "%RISCV_GCC_BIN%"
+    "E:\MounRiverToolchain\riscv-none-elf-gcc-12-win-1.92\bin"
     "C:\MounRiver\MounRiver_Studio2\resources\app\resources\win32\components\WCH\Toolchain\RISC-V Embedded GCC12\bin"
     "C:\MounRiver\MounRiver_Studio2\resources\app\resources\win32\components\WCH\Toolchain\RISC-V Embedded GCC15\bin"
     "C:\MounRiver\MounRiver_Studio2\resources\app\resources\win32\components\WCH\Toolchain\RISC-V Embedded GCC\bin"
 ) do (
     if not defined TCBIN if exist "%%~D\riscv-wch-elf-gcc.exe" set "TCBIN=%%~D"
+    if not defined TCBIN if exist "%%~D\riscv-none-elf-gcc.exe" set "TCBIN=%%~D"
     if not defined TCBIN if exist "%%~D\riscv32-wch-elf-gcc.exe" set "TCBIN=%%~D"
     if not defined TCBIN if exist "%%~D\riscv-none-embed-gcc.exe" set "TCBIN=%%~D"
 )
 
 if not defined TCBIN (
-    for %%X in (riscv-wch-elf-gcc.exe riscv32-wch-elf-gcc.exe riscv-none-embed-gcc.exe) do (
+    for %%X in (riscv-wch-elf-gcc.exe riscv-none-elf-gcc.exe riscv32-wch-elf-gcc.exe riscv-none-embed-gcc.exe) do (
         where %%X >nul 2>nul && set "TCBIN=%%~dpX"
     )
 )
@@ -56,6 +58,8 @@ if not defined TCBIN (
 
 if exist "%TCBIN%\riscv-wch-elf-gcc.exe" (
     set "PREF=riscv-wch-elf"
+) else if exist "%TCBIN%\riscv-none-elf-gcc.exe" (
+    set "PREF=riscv-none-elf"
 ) else if exist "%TCBIN%\riscv32-wch-elf-gcc.exe" (
     set "PREF=riscv32-wch-elf"
 ) else (

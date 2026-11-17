@@ -17,10 +17,9 @@
  * user flash starting at 0x08000000. The settings region WL_FLASH
  * (0x08003F00..0x08003FFF) is never written or erased.
  *
- * Boot mode is fixed at compile time to IO: PC3 held low (button pressed to
- * GND) at power-on -> stay in IAP mode; PC3 high -> jump straight to the
- * application. The old COMMAND mode (magic word 0x5AA55AA5 at 0x08003FFC)
- * and CMD_JUMP_IAP are permanently removed (TZ sections 3.3, 3.5.2).
+ * Boot mode: PC3 held low (button pressed to GND) enters IAP immediately;
+ * otherwise wait up to 150 ms for the host's 0xAA sync byte before starting
+ * the application. The old COMMAND mode and CMD_JUMP_IAP are removed.
  *
  * UART protocol packet format:
  *   [0xAA] [0x55] [Cmd] [Len] [Data...] [ChecksumL] [ChecksumH] [0x55] [0xAA]
@@ -39,10 +38,7 @@
 /* Flag set by UART_Rx_Deal() when a complete firmware image is received */
 extern u8 End_Flag;
 
-/* Boot mode fixed at compile time: IO only (PC3 button).
- * The COMMAND mode constant is intentionally gone — see the header comment. */
-#define UPGRADE_MODE_IO    1
-#define UPGRADE_MODE       UPGRADE_MODE_IO
+/* Manual entry via PC3 is retained alongside host-triggered UART entry. */
 
 /* ~3 cycles per iteration at 24 MHz => ~125 ns; 1,500,000 iterations give
  * ~150-190 ms — comfortably above the >=100 ms UART drain pause (TZ 3.5.2). */
@@ -64,14 +60,38 @@ void IAP_2_APP(void)
     NVIC_SystemReset();
 }
 
+static u8 Wait_Host_Sync(void)
+{
+    SysTick->CTLR = 0;
+    SysTick->CNT  = 0;
+    SysTick->CTLR = 1; /* STE = 1, HCLK/8 = 3 MHz */
+
+    while (SysTick->CNT < 450000UL)
+    {
+        if (USART1->STATR & USART_FLAG_RXNE)
+        {
+            u8 received = (u8)(USART1->DATAR & 0xFF);
+            if (received == Uart_Sync_Head1)
+            {
+                SysTick->CTLR = 0;
+                Sync_Head1_Received = 1;
+                return 1;
+            }
+        }
+    }
+
+    SysTick->CTLR = 0;
+    return 0;
+}
+
 /*********************************************************************
  * @fn      main
  *
  * @brief   Bootloader entry point.
  *          1. Enables clocks for GPIOD (USART1 TX/RX), USART1, GPIOC.
  *          2. Configures USART1 for 460800 baud.
- *          3. IO mode: PC3 high -> jump to the application; PC3 low
- *             (button pressed) -> stay in IAP mode and poll USART1.
+ *          3. PC3 low enters IAP immediately; otherwise a host sync byte
+ *             received within 150 ms enters IAP, and timeout starts the app.
  *          4. When END (0x83) is received: drain the UART for >=100 ms
  *             and reset into the application.
  *
@@ -92,9 +112,8 @@ int main(void)
     /* Configure USART1: 460800 baud, 8N1, no flow control */
     USART1_CFG();
 
-    /* IO mode (fixed): PC3 high (no button) -> jump to the application.
-     * PC3 low (button pressed to GND) -> stay in IAP mode. */
-    if (PC3_Check() != 0)
+    /* The hardware button remains the priority manual entry path. */
+    if (PC3_Check() != 0 && Wait_Host_Sync() == 0)
     {
         IAP_2_APP();
         while (1);
